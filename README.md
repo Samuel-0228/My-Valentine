@@ -27,15 +27,8 @@ Built to tease, charm, and (politely) force a YES — with a runaway button, a c
 
 ## 🎬 Demo
 
-![Demo Preview](./demo.gif)
+![Demo Preview](images/demo.gif)
 
 > 🖼️ **Demo GIF**
->
-> The preview shows:
->
-> - The “No” button dodging the cursor
-> - Floating hearts and sparkles
-> - Countdown reaching zero
-> - A full celebration moment 💘🎉
 
-👉 Live Demo (after deployment):
+👉 Live : [Will you be My Valentine?](https://will-you-babe.vercel.app/)
