@@ -213,6 +213,16 @@ const App: React.FC = () => {
       <div className="fixed bottom-4 right-4 text-rose-200 opacity-50">
         <Sparkles className="w-16 h-16" />
       </div>
+       <div className="fixed bottom-6 w-full flex justify-center pointer-events-none z-10">
+        <a 
+          href="https://t.me/savvy_society"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="bg-white/30 backdrop-blur-sm px-4 py-1.5 rounded-full text-rose-400 text-sm font-semibold tracking-wide border border-rose-200/20 shadow-sm hover:bg-rose-50 hover:text-rose-600 hover:scale-105 transition-all duration-300 pointer-events-auto cursor-pointer"
+        >
+          built with ❤️‍🔥 by savvy
+        </a>
+      </div>
     </div>
   );
 };
