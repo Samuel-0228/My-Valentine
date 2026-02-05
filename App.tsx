@@ -88,7 +88,7 @@ const SuccessScreen = ({ message }: { message: string }) => {
 const App: React.FC = () => {
   const [isAccepted, setIsAccepted] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
-  const [timeLeft, setTimeLeft] = useState(60);
+  const [timeLeft, setTimeLeft] = useState(100);
   const [noButtonPos, setNoButtonPos] = useState({ x: 0, y: 0 });
   const [isNoButtonMoved, setIsNoButtonMoved] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
