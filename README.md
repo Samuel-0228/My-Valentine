@@ -10,8 +10,6 @@ A playful, romantic, and interactive Valentine’s Day web experience where
 
 Built to tease, charm, and (politely) force a YES — with a runaway button, a countdown timer, and love-filled animations.
 
----
-
 ## ✨ Features
 
 - 💕 Big romantic question: **“Will you be my Valentine?”**
@@ -21,8 +19,6 @@ Built to tease, charm, and (politely) force a YES — with a runaway button, a c
 - 🎉 Celebration animations (hearts, sparkles, confetti)
 - 🎨 Colorful, romantic UI with smooth transitions
 - 📱 Fully responsive (mobile & desktop)
-
----
 
 ## 🎬 Demo
 
