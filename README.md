@@ -21,7 +21,6 @@ Built to tease, charm, and (politely) force a YES — with a runaway button, a c
 - 🎉 Celebration animations (hearts, sparkles, confetti)
 - 🎨 Colorful, romantic UI with smooth transitions
 - 📱 Fully responsive (mobile & desktop)
-- 🌐 No backend — pure HTML, CSS & JavaScript
 
 ---
 
