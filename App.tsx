@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { 
   Heart, Sparkles, Clock, Music, VolumeX, MessageCircle, 
@@ -30,12 +29,12 @@ interface GlobalResponse {
 }
 
 const STORAGE_KEYS = {
-  ACCEPTED: 'valentine_accepted_v8',
-  REACTION: 'valentine_ai_reaction_v8',
-  MY_USERNAME: 'valentine_my_username_v8',
-  LOCAL_FEED: 'valentine_local_feed_v8',
-  LIKED_POSTS: 'valentine_liked_posts_v8',
-  THEME: 'valentine_theme_v8'
+  ACCEPTED: 'valentine_accepted_v9',
+  REACTION: 'valentine_ai_reaction_v9',
+  MY_USERNAME: 'valentine_my_username_v9',
+  LOCAL_FEED: 'valentine_local_feed_v9',
+  LIKED_POSTS: 'valentine_liked_posts_v9',
+  THEME: 'valentine_theme_v9'
 };
 
 const PROMPTS = [
@@ -96,7 +95,6 @@ const THEME_CONFIG: Record<ThemeMode, {
   }
 };
 
-// --- Supabase Config ---
 const getSupabaseConfig = () => {
   const url = (import.meta as any).env?.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
   const key = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -171,11 +169,19 @@ const App: React.FC = () => {
 
   // --- Data Logic ---
   useEffect(() => {
+    // Load local cache immediately
+    const cached = localStorage.getItem(STORAGE_KEYS.LOCAL_FEED);
+    if (cached) setGlobalFeed(JSON.parse(cached));
+
     if (supabase) {
       const fetchData = async () => {
         const { data: postsData } = await supabase.from('responses').select('*').order('created_at', { ascending: false }).limit(40);
         const { data: repliesData } = await supabase.from('replies').select('*');
-        if (postsData) { setGlobalFeed(postsData); setIsConnected(true); }
+        if (postsData) { 
+          setGlobalFeed(postsData); 
+          setIsConnected(true); 
+          localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(postsData));
+        }
         if (repliesData) {
           const replyMap: Record<string | number, Reply[]> = {};
           repliesData.forEach((r: Reply) => {
@@ -189,8 +195,18 @@ const App: React.FC = () => {
 
       const postsChannel = supabase.channel('posts-channel')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'responses' }, (payload) => {
-          if (payload.eventType === 'INSERT') setGlobalFeed(prev => [payload.new as GlobalResponse, ...prev].slice(0, 50));
-          if (payload.eventType === 'UPDATE') setGlobalFeed(prev => prev.map(p => p.id === payload.new.id ? { ...p, ...payload.new } : p));
+          if (payload.eventType === 'INSERT') setGlobalFeed(prev => {
+            const exists = prev.some(p => p.id === payload.new.id);
+            if (exists) return prev;
+            const updated = [payload.new as GlobalResponse, ...prev].slice(0, 50);
+            localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated));
+            return updated;
+          });
+          if (payload.eventType === 'UPDATE') setGlobalFeed(prev => {
+            const updated = prev.map(p => p.id === payload.new.id ? { ...p, ...payload.new } : p);
+            localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated));
+            return updated;
+          });
         }).subscribe();
 
       const repliesChannel = supabase.channel('replies-channel')
@@ -208,40 +224,78 @@ const App: React.FC = () => {
 
   const handleLike = async (postId: string | number) => {
     if (likedPosts.has(postId)) return;
-    const post = globalFeed.find(p => p.id === postId);
-    if (!post || !supabase) return;
+    
+    // Optimistic state update
+    setGlobalFeed(prev => prev.map(p => p.id === postId ? { ...p, likes: (p.likes || 0) + 1 } : p));
     const newLiked = new Set(likedPosts).add(postId);
     setLikedPosts(newLiked);
     localStorage.setItem(STORAGE_KEYS.LIKED_POSTS, JSON.stringify(Array.from(newLiked)));
+    
     confetti({ particleCount: 20, spread: 50, colors: [theme === 'dark' ? '#fb7185' : '#f43f5e'] });
-    if (isConnected) await supabase.from('responses').update({ likes: (post.likes || 0) + 1 }).eq('id', postId);
+
+    if (supabase && isConnected) {
+      const post = globalFeed.find(p => p.id === postId);
+      await supabase.from('responses').update({ likes: (post?.likes || 0) + 1 }).eq('id', postId);
+    }
   };
 
   const handleReplySubmit = async (postId: string | number) => {
-    if (!replyText.trim() || !supabase) return;
+    if (!replyText.trim()) return;
     const username = getOrGenerateUsername();
-    const { data, error } = await supabase.from('replies').insert([{ post_id: postId, username, content: replyText }]).select();
-    if (!error && data) {
-      setReplyText("");
-      setReplyingTo(null);
-      confetti({ particleCount: 15, spread: 30, colors: ['#fb7185'] });
+    
+    // Optimistic state update
+    const tempReply: Reply = {
+      id: 'temp-' + Date.now(),
+      post_id: postId,
+      username,
+      content: replyText,
+      created_at: new Date().toISOString()
+    };
+    setReplies(prev => ({ ...prev, [postId]: [...(prev[postId] || []), tempReply] }));
+    
+    const contentToSubmit = replyText;
+    setReplyText("");
+    setReplyingTo(null);
+    confetti({ particleCount: 15, spread: 30, colors: ['#fb7185'] });
+
+    if (supabase && isConnected) {
+      await supabase.from('replies').insert([{ post_id: postId, username, content: contentToSubmit }]);
     }
   };
 
   const saveToFeed = async (question: string, answer: string) => {
     const username = getOrGenerateUsername();
-    if (supabase && isConnected) await supabase.from('responses').insert([{ username, question, answer, likes: 0 }]);
+    
+    // Optimistic state update
+    const tempPost: GlobalResponse = {
+      id: 'temp-' + Date.now(),
+      username,
+      question,
+      answer,
+      likes: 0,
+      created_at: new Date().toISOString()
+    };
+    setGlobalFeed(prev => [tempPost, ...prev]);
+    localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify([tempPost, ...globalFeed]));
+
     confetti({ particleCount: 30, spread: 60 });
+
+    if (supabase && isConnected) {
+      const { data, error } = await supabase.from('responses').insert([{ username, question, answer, likes: 0 }]).select();
+      if (!error && data) {
+        // Replace temp post with real post from DB
+        setGlobalFeed(prev => prev.map(p => p.id === tempPost.id ? data[0] : p));
+      }
+    }
   };
 
-  // --- Fix: Implemented generateAiSpark ---
   const generateAiSpark = async () => {
     setIsGenerating(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: "Generate a short, unique, and sweet romantic confession or anonymous Valentine's message. Keep it under 15 words and make it feel authentic.",
+        contents: "Generate a short, unique, and sweet romantic confession or anonymous Valentine's message. Max 15 words.",
       });
       if (response.text) {
         setNewConfession(response.text.trim().replace(/^"|"$/g, ''));
@@ -253,27 +307,25 @@ const App: React.FC = () => {
     }
   };
 
-  // --- Fix: Implemented handleConfessionSubmit ---
   const handleConfessionSubmit = async () => {
     if (!newConfession.trim()) return;
-    await saveToFeed("Confession", newConfession);
+    const content = newConfession;
     setNewConfession("");
+    await saveToFeed("Confession", content);
   };
 
-  // --- Fix: Implemented handlePromptSubmit ---
   const handlePromptSubmit = async () => {
     if (!promptAnswer.trim()) return;
+    const content = promptAnswer;
+    setPromptAnswer("");
+    await saveToFeed(currentPrompt, content);
     
-    // Save to global feed
-    await saveToFeed(currentPrompt, promptAnswer);
-    
-    // Generate AI reaction
     setIsGenerating(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `Someone answered the Valentine's prompt "${currentPrompt}" with: "${promptAnswer}". Write a very short (max 10 words), sweet, charming, or slightly playful reaction to their answer.`,
+        contents: `Reaction to answer "${content}" for prompt "${currentPrompt}". Max 10 words. Sweet/playful.`,
       });
       if (response.text) {
         const reaction = response.text.trim().replace(/^"|"$/g, '');
@@ -284,7 +336,6 @@ const App: React.FC = () => {
       console.error("AI Reaction failed", error);
     } finally {
       setIsGenerating(false);
-      setPromptAnswer("");
     }
   };
 
@@ -293,7 +344,6 @@ const App: React.FC = () => {
     localStorage.setItem(STORAGE_KEYS.THEME, newTheme);
   };
 
-  // --- Timer logic ---
   useEffect(() => {
     if (timeLeft > 0 && !isAccepted) {
       timerIntervalRef.current = window.setInterval(() => setTimeLeft(prev => prev - 1), 1000);
@@ -320,7 +370,6 @@ const App: React.FC = () => {
     <div className={`min-h-screen w-full relative ${activeTheme.bg} transition-colors duration-500 flex flex-col items-center pt-24 pb-24 overflow-x-hidden`}>
       <FloatingHearts colorClass={activeTheme.heart} />
       
-      {/* Navbar */}
       <nav className="fixed top-6 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-lg">
         <div className={`backdrop-blur-xl border ${activeTheme.nav} p-1.5 rounded-full shadow-lg flex justify-between items-center transition-all duration-500`}>
           <button onClick={() => setCurrentView('home')} className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-full transition-all ${currentView === 'home' ? activeTheme.accent : 'text-rose-400 hover:bg-rose-50/10'}`}>
@@ -484,9 +533,7 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* --- Controls --- */}
       <div className="fixed bottom-6 right-6 flex flex-col gap-3 items-end z-20">
-        {/* Theme Switcher */}
         <div className={`flex items-center gap-1 p-1 rounded-full backdrop-blur-md border shadow-lg transition-all duration-500 ${activeTheme.nav}`}>
           <button onClick={() => toggleTheme('romantic')} className={`p-2 rounded-full transition-all ${theme === 'romantic' ? 'bg-rose-500 text-white' : 'text-rose-400'}`} title="Romantic Theme"><Heart size={16} /></button>
           <button onClick={() => toggleTheme('dark')} className={`p-2 rounded-full transition-all ${theme === 'dark' ? 'bg-slate-700 text-white' : 'text-slate-500'}`} title="Dark Theme"><Moon size={16} /></button>
@@ -494,7 +541,6 @@ const App: React.FC = () => {
           <button onClick={() => toggleTheme('calm')} className={`p-2 rounded-full transition-all ${theme === 'calm' ? 'bg-slate-700 text-white' : 'text-slate-400'}`} title="Calm Theme"><Leaf size={16} /></button>
         </div>
         
-        {/* Audio Toggle */}
         <button onClick={() => setIsMuted(!isMuted)} className={`p-3 backdrop-blur-md rounded-full shadow-sm border z-20 hover:scale-110 transition-all ${activeTheme.nav} ${activeTheme.text}`}>
           {isMuted ? <VolumeX size={20} /> : <Music size={20} className="animate-pulse" />}
         </button>
