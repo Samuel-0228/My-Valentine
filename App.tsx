@@ -25,16 +25,16 @@ interface GlobalResponse {
   question: string;
   answer: string;
   created_at: string;
-  likes: number;
+  likes: number; // UI state only unless DB column is added
 }
 
 const STORAGE_KEYS = {
-  ACCEPTED: 'valentine_accepted_v10',
-  REACTION: 'valentine_ai_reaction_v10',
-  MY_USERNAME: 'valentine_my_username_v10',
-  LOCAL_FEED: 'valentine_local_feed_v10',
-  LIKED_POSTS: 'valentine_liked_posts_v10',
-  THEME: 'valentine_theme_v10'
+  ACCEPTED: 'valentine_accepted_v11',
+  REACTION: 'valentine_ai_reaction_v11',
+  MY_USERNAME: 'valentine_my_username_v11',
+  LOCAL_FEED: 'valentine_local_feed_v11',
+  LIKED_POSTS: 'valentine_liked_posts_v11',
+  THEME: 'valentine_theme_v11'
 };
 
 const PROMPTS = [
@@ -96,8 +96,9 @@ const THEME_CONFIG: Record<ThemeMode, {
 };
 
 const getSupabaseConfig = () => {
-  const url = (import.meta as any).env?.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const key = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
+  // Try multiple env sources
+  const url = process.env.VITE_SUPABASE_URL || (import.meta as any).env?.VITE_SUPABASE_URL || '';
+  const key = process.env.VITE_SUPABASE_ANON_KEY || (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || '';
   return { url, key };
 };
 
@@ -166,8 +167,6 @@ const App: React.FC = () => {
   const supabase = useMemo(() => (config.url && config.key) ? createClient(config.url, config.key) : null, [config]);
 
   const activeTheme = THEME_CONFIG[theme];
-
-  // Ref to keep track of current feed for async handlers (avoid stale closures)
   const feedRef = useRef<GlobalResponse[]>([]);
   useEffect(() => { feedRef.current = globalFeed; }, [globalFeed]);
 
@@ -179,13 +178,14 @@ const App: React.FC = () => {
     if (supabase) {
       const fetchData = async () => {
         try {
-          const { data: postsData } = await supabase.from('responses').select('*').order('created_at', { ascending: false }).limit(40);
-          const { data: repliesData } = await supabase.from('replies').select('*');
+          const { data: postsData, error: postError } = await supabase.from('responses').select('*').order('created_at', { ascending: false }).limit(50);
+          const { data: repliesData, error: replyError } = await supabase.from('replies').select('*');
           
           if (postsData) { 
-            setGlobalFeed(postsData); 
+            const formatted = postsData.map(p => ({ ...p, likes: p.likes || 0 }));
+            setGlobalFeed(formatted); 
             setIsConnected(true); 
-            localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(postsData));
+            localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(formatted));
           }
           if (repliesData) {
             const replyMap: Record<string | number, Reply[]> = {};
@@ -196,7 +196,7 @@ const App: React.FC = () => {
             setReplies(replyMap);
           }
         } catch (err) {
-          console.error("Initial fetch failed:", err);
+          console.error("Supabase link issue:", err);
         }
       };
       fetchData();
@@ -205,19 +205,15 @@ const App: React.FC = () => {
         .on('postgres_changes', { event: '*', schema: 'public', table: 'responses' }, (payload) => {
           if (payload.eventType === 'INSERT') {
             setGlobalFeed(prev => {
-              // Deduplicate (in case optimistic update matches the incoming DB insert)
               if (prev.some(p => p.id === payload.new.id)) return prev;
-              const updated = [payload.new as GlobalResponse, ...prev].slice(0, 50);
+              const newPost = { ...(payload.new as GlobalResponse), likes: payload.new.likes || 0 };
+              const updated = [newPost, ...prev].slice(0, 50);
               localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated));
               return updated;
             });
           }
           if (payload.eventType === 'UPDATE') {
-            setGlobalFeed(prev => {
-              const updated = prev.map(p => p.id === payload.new.id ? { ...p, ...payload.new } : p);
-              localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated));
-              return updated;
-            });
+            setGlobalFeed(prev => prev.map(p => p.id === payload.new.id ? { ...p, ...payload.new } : p));
           }
         }).subscribe();
 
@@ -225,8 +221,9 @@ const App: React.FC = () => {
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'replies' }, (payload) => {
           const newReply = payload.new as Reply;
           setReplies(prev => {
-            if ((prev[newReply.post_id] || []).some(r => r.id === newReply.id)) return prev;
-            return { ...prev, [newReply.post_id]: [...(prev[newReply.post_id] || []), newReply] };
+            const current = prev[newReply.post_id] || [];
+            if (current.some(r => r.id === newReply.id)) return prev;
+            return { ...prev, [newReply.post_id]: [...current, newReply] };
           });
         }).subscribe();
 
@@ -238,57 +235,39 @@ const App: React.FC = () => {
   }, [supabase]);
 
   const handleLike = async (postId: string | number) => {
-    // Prevent liking optimistic temp posts that don't have a DB ID yet
     if (likedPosts.has(postId) || String(postId).startsWith('temp-')) return;
     
-    // 1. Optimistic Update
+    // UI only update for likes since schema doesn't have likes column
     setGlobalFeed(prev => prev.map(p => p.id === postId ? { ...p, likes: (p.likes || 0) + 1 } : p));
     const newLiked = new Set(likedPosts).add(postId);
     setLikedPosts(newLiked);
     localStorage.setItem(STORAGE_KEYS.LIKED_POSTS, JSON.stringify(Array.from(newLiked)));
-    
-    confetti({ particleCount: 20, spread: 50, colors: [theme === 'dark' ? '#fb7185' : '#f43f5e'] });
+    confetti({ particleCount: 15, spread: 40, colors: ['#f43f5e'] });
 
-    // 2. Real Persistence
-    if (supabase) {
-      // Find current count from ref to avoid stale closure issues
-      const currentPost = feedRef.current.find(p => p.id === postId);
-      const newCount = (currentPost?.likes || 0) + 1;
-      const { error } = await supabase.from('responses').update({ likes: newCount }).eq('id', postId);
-      if (error) console.error("Persistence failed for like:", error);
-    }
+    // We skip DB update here to prevent errors if the 'likes' column is missing in DB
+    // To enable: Run 'ALTER TABLE responses ADD COLUMN likes INTEGER DEFAULT 0;'
   };
 
   const handleReplySubmit = async (postId: string | number) => {
     if (!replyText.trim() || String(postId).startsWith('temp-')) return;
     const username = getOrGenerateUsername();
-    
-    const contentToSubmit = replyText;
+    const content = replyText;
     setReplyText("");
     setReplyingTo(null);
 
-    // 1. Optimistic Local state update
-    const tempReplyId = 'temp-reply-' + Date.now();
-    const tempReply: Reply = {
-      id: tempReplyId,
-      post_id: postId,
-      username,
-      content: contentToSubmit,
-      created_at: new Date().toISOString()
-    };
-    setReplies(prev => ({ ...prev, [postId]: [...(prev[postId] || []), tempReply] }));
-    confetti({ particleCount: 15, spread: 30, colors: ['#fb7185'] });
+    // Optimistic
+    const tempId = 'tr-' + Date.now();
+    setReplies(prev => ({ 
+      ...prev, 
+      [postId]: [...(prev[postId] || []), { id: tempId, post_id: postId, username, content, created_at: new Date().toISOString() }] 
+    }));
 
-    // 2. Real Persistence
     if (supabase) {
-      const { data, error } = await supabase.from('replies').insert([{ post_id: postId, username, content: contentToSubmit }]).select();
-      if (error) {
-        console.error("Reply save failed:", error);
-      } else if (data) {
-        // Swap temp reply for real one
+      const { data, error } = await supabase.from('replies').insert([{ post_id: postId, username, content }]).select();
+      if (!error && data) {
         setReplies(prev => ({
           ...prev,
-          [postId]: prev[postId].map(r => r.id === tempReplyId ? data[0] : r)
+          [postId]: (prev[postId] || []).map(r => r.id === tempId ? data[0] : r)
         }));
       }
     }
@@ -296,32 +275,23 @@ const App: React.FC = () => {
 
   const saveToFeed = async (question: string, answer: string) => {
     const username = getOrGenerateUsername();
-    
-    // 1. Optimistic local state update
     const tempId = 'temp-' + Date.now();
-    const tempPost: GlobalResponse = {
-      id: tempId,
-      username,
-      question,
-      answer,
-      likes: 0,
-      created_at: new Date().toISOString()
-    };
+    
+    // Optimistic
+    const tempPost: GlobalResponse = { id: tempId, username, question, answer, likes: 0, created_at: new Date().toISOString() };
     setGlobalFeed(prev => [tempPost, ...prev]);
     confetti({ particleCount: 30, spread: 60 });
 
-    // 2. Real Persistence
     if (supabase) {
-      const { data, error } = await supabase.from('responses').insert([{ username, question, answer, likes: 0 }]).select();
+      // NOTE: We omit 'likes' here to match the schema you provided (id, username, question, answer, created_at)
+      const { data, error } = await supabase.from('responses').insert([{ username, question, answer }]).select();
+      
       if (error) {
-        console.error("Post save failed:", error);
-        // Maybe revert optimistic update if save fails completely? 
-        // For now, keep it local as a "ghost" post.
-      } else if (data) {
-        // Replace temp post with real post from DB (this updates the ID so likes/replies work)
+        console.error("Supabase Insert Error:", error.message);
+      } else if (data && data.length > 0) {
         setGlobalFeed(prev => {
-          const updated = prev.map(p => p.id === tempId ? data[0] : p);
-          localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated.filter(p => !String(p.id).startsWith('temp-'))));
+          const updated = prev.map(p => p.id === tempId ? { ...data[0], likes: 0 } : p);
+          localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated.filter(u => !String(u.id).startsWith('temp-'))));
           return updated;
         });
       }
@@ -334,45 +304,11 @@ const App: React.FC = () => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: "Generate a short, unique, and sweet romantic confession or anonymous Valentine's message. Max 15 words. Just text.",
+        contents: "Write a short, heart-melting anonymous Valentine confession. Max 12 words.",
       });
-      if (response.text) {
-        setNewConfession(response.text.trim().replace(/^"|"$/g, ''));
-      }
-    } catch (error) {
-      console.error("AI Spark failed", error);
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const handleConfessionSubmit = async () => {
-    if (!newConfession.trim()) return;
-    const content = newConfession;
-    setNewConfession("");
-    await saveToFeed("Confession", content);
-  };
-
-  const handlePromptSubmit = async () => {
-    if (!promptAnswer.trim()) return;
-    const content = promptAnswer;
-    setPromptAnswer("");
-    await saveToFeed(currentPrompt, content);
-    
-    setIsGenerating(true);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: `Reaction to answer "${content}" for prompt "${currentPrompt}". Max 10 words. Sweet/playful. Just text.`,
-      });
-      if (response.text) {
-        const reaction = response.text.trim().replace(/^"|"$/g, '');
-        setAiReaction(reaction);
-        localStorage.setItem(STORAGE_KEYS.REACTION, reaction);
-      }
-    } catch (error) {
-      console.error("AI Reaction failed", error);
+      if (response.text) setNewConfession(response.text.trim().replace(/^"|"$/g, ''));
+    } catch (e) {
+      setNewConfession("You make my heart skip a beat... anonymously. ❤️");
     } finally {
       setIsGenerating(false);
     }
@@ -399,12 +335,6 @@ const App: React.FC = () => {
     confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
   };
 
-  const moveNoButton = useCallback(() => {
-    const p = 100;
-    setNoButtonPos({ x: Math.random() * (window.innerWidth - p * 2) + p, y: Math.random() * (window.innerHeight - p * 2) + p });
-    setIsNoButtonMoved(true);
-  }, []);
-
   return (
     <div className={`min-h-screen w-full relative ${activeTheme.bg} transition-colors duration-500 flex flex-col items-center pt-24 pb-24 overflow-x-hidden`}>
       <FloatingHearts colorClass={activeTheme.heart} />
@@ -430,9 +360,9 @@ const App: React.FC = () => {
               <div className="space-y-6 animate-in fade-in zoom-in">
                 <Heart fill={theme === 'dark' ? '#fb7185' : '#e11d48'} className={`w-32 h-32 ${activeTheme.text} animate-bounce mx-auto`} />
                 <h1 className={`text-4xl md:text-6xl font-pacifico ${activeTheme.text}`}>{successMessage}</h1>
-                <p className={`text-xl italic ${activeTheme.text} opacity-80`}>Our world is glowing. ✨</p>
+                <p className={`text-xl italic ${activeTheme.text} opacity-80`}>The world is brighter now. ✨</p>
                 <button onClick={() => setCurrentView('wall')} className={`mt-8 px-8 py-3 rounded-full font-bold shadow-lg flex items-center gap-2 mx-auto active:scale-95 transition-all ${activeTheme.accent}`}>
-                  View Global Feed <ChevronRight size={18} />
+                  Explore Global Feed <ChevronRight size={18} />
                 </button>
               </div>
             ) : (
@@ -441,10 +371,13 @@ const App: React.FC = () => {
                 <div className="flex flex-col sm:flex-row items-center justify-center gap-8 min-h-[160px]">
                   <button onClick={() => handleAccept("Yay! Forever yours! 💕")} className={`group relative px-14 py-5 rounded-full text-2xl font-bold transition-all hover:scale-105 active:scale-95 ${activeTheme.accent}`}>
                     Yes 💖
-                    <div className="absolute inset-0 rounded-full bg-rose-400 animate-ping opacity-20 pointer-events-none" />
                   </button>
                   <button
-                    onMouseEnter={moveNoButton} onTouchStart={moveNoButton}
+                    onMouseEnter={() => {
+                      const p = 100;
+                      setNoButtonPos({ x: Math.random() * (window.innerWidth - p * 2) + p, y: Math.random() * (window.innerHeight - p * 2) + p });
+                      setIsNoButtonMoved(true);
+                    }}
                     style={isNoButtonMoved ? { position: 'fixed', left: `${noButtonPos.x}px`, top: `${noButtonPos.y}px`, zIndex: 100, transform: 'translate(-50%, -50%)' } : {}}
                     className={`px-8 py-3 rounded-full text-lg font-semibold shadow-sm transition-all ${theme === 'dark' ? 'bg-slate-800 text-slate-500' : 'bg-white/80 text-gray-400'}`}
                   >No 🙃</button>
@@ -463,23 +396,23 @@ const App: React.FC = () => {
         {currentView === 'wall' && (
           <div className="w-full space-y-8 view-enter">
             <div className="text-center">
-              <h2 className={`text-4xl font-pacifico mb-2 ${activeTheme.text}`}>Global Feed</h2>
+              <h2 className={`text-4xl font-pacifico mb-2 ${activeTheme.text}`}>Global Confessions</h2>
               <span className={`px-4 py-1 text-[10px] font-bold uppercase tracking-widest rounded-full border shadow-sm ${isConnected ? 'bg-green-500/10 text-green-500 border-green-500/20' : 'bg-rose-500/10 text-rose-500 border-rose-500/20'}`}>
-                {isConnected ? '• Live' : 'Connecting...'}
+                {isConnected ? '• Live' : 'Connecting to Heartbeat...'}
               </span>
             </div>
 
             <div className={`backdrop-blur-md p-4 rounded-3xl border space-y-3 transition-all ${activeTheme.card}`}>
               <textarea 
                 value={newConfession} onChange={(e) => setNewConfession(e.target.value)} 
-                placeholder="Post a global confession..." 
+                placeholder="Type your anonymous confession here..." 
                 className={`w-full rounded-2xl p-4 border-none focus:ring-2 focus:ring-rose-200 resize-none h-24 font-medium transition-all ${activeTheme.input}`} 
               />
               <div className="flex justify-between items-center px-1">
                 <button onClick={generateAiSpark} disabled={isGenerating} className={`text-xs font-bold flex items-center gap-1 transition-colors disabled:opacity-50 ${activeTheme.text} opacity-70 hover:opacity-100`}>
                   <Sparkles size={14} /> AI Spark
                 </button>
-                <button onClick={handleConfessionSubmit} disabled={!newConfession.trim()} className={`px-6 py-2 rounded-full font-bold flex items-center gap-2 active:scale-95 disabled:opacity-50 transition-all ${activeTheme.accent}`}>
+                <button onClick={() => { if(newConfession.trim()) { saveToFeed("Confession", newConfession); setNewConfession(""); } }} disabled={!newConfession.trim()} className={`px-6 py-2 rounded-full font-bold flex items-center gap-2 active:scale-95 disabled:opacity-50 transition-all ${activeTheme.accent}`}>
                   Post <Send size={16} />
                 </button>
               </div>
@@ -489,54 +422,37 @@ const App: React.FC = () => {
               {globalFeed.map((post) => {
                 const isTemp = String(post.id).startsWith('temp-');
                 return (
-                  <div key={post.id} className={`p-6 rounded-3xl border transition-all animate-in slide-in-from-bottom-2 ${activeTheme.card} ${isTemp ? 'opacity-50 grayscale-[0.5]' : ''}`}>
-                    <div>
-                      <div className="flex justify-between items-center mb-1">
-                        <span className={`text-xs font-bold uppercase flex items-center gap-1 opacity-70 ${activeTheme.text}`}><Ghost size={12} /> {post.username} {isTemp && "(Sending...)"}</span>
-                        <span className={`text-[10px] font-medium opacity-50 ${activeTheme.text}`}>{new Date(post.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                      </div>
-                      {post.question !== "Confession" && <p className={`text-[10px] font-bold uppercase mb-1 opacity-60 ${activeTheme.text}`}>Q: {post.question}</p>}
-                      <p className={`font-medium italic text-xl ${theme === 'vivid' ? 'text-white' : activeTheme.text} ${theme !== 'vivid' && 'opacity-90'}`}>"{post.answer}"</p>
+                  <div key={post.id} className={`p-6 rounded-3xl border transition-all animate-in slide-in-from-bottom-2 ${activeTheme.card} ${isTemp ? 'opacity-50' : ''}`}>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className={`text-xs font-bold uppercase flex items-center gap-1 opacity-70 ${activeTheme.text}`}><Ghost size={12} /> {post.username} {isTemp && "(Syncing...)"}</span>
+                      <span className={`text-[10px] font-medium opacity-50 ${activeTheme.text}`}>{new Date(post.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                     </div>
+                    {post.question !== "Confession" && <p className={`text-[10px] font-bold uppercase mb-1 opacity-60 ${activeTheme.text}`}>Q: {post.question}</p>}
+                    <p className={`font-medium italic text-xl ${theme === 'vivid' ? 'text-white' : activeTheme.text}`}>"{post.answer}"</p>
 
-                    <div className={`flex items-center gap-4 pt-2 border-t mt-4 transition-all ${theme === 'vivid' ? 'border-white/20' : 'border-rose-100/50'}`}>
-                      <button 
-                        onClick={() => handleLike(post.id)} 
-                        disabled={likedPosts.has(post.id) || isTemp}
-                        className={`flex items-center gap-1.5 transition-all font-bold text-sm ${likedPosts.has(post.id) ? 'text-rose-500 cursor-default' : activeTheme.text + ' opacity-70 hover:opacity-100 group'} ${isTemp ? 'cursor-not-allowed opacity-30' : ''}`}
-                      >
+                    <div className={`flex items-center gap-4 pt-4 border-t mt-4 transition-all ${theme === 'vivid' ? 'border-white/20' : 'border-rose-100/30'}`}>
+                      <button onClick={() => handleLike(post.id)} disabled={likedPosts.has(post.id) || isTemp} className={`flex items-center gap-1.5 transition-all font-bold text-sm ${likedPosts.has(post.id) ? 'text-rose-500' : activeTheme.text + ' opacity-70 hover:opacity-100 group'}`}>
                         <Heart size={16} className={`${likedPosts.has(post.id) ? 'fill-rose-500 text-rose-500' : 'group-hover:scale-125 transition-transform'}`} />
                         {post.likes || 0}
                       </button>
-                      <button onClick={() => !isTemp && setReplyingTo(replyingTo === post.id ? null : post.id)} className={`flex items-center gap-1.5 transition-all font-bold text-sm ${activeTheme.text} opacity-70 hover:opacity-100 ${isTemp ? 'cursor-not-allowed opacity-30' : ''}`}>
+                      <button onClick={() => !isTemp && setReplyingTo(replyingTo === post.id ? null : post.id)} className={`flex items-center gap-1.5 transition-all font-bold text-sm ${activeTheme.text} opacity-70 hover:opacity-100`}>
                         <MessageSquare size={16} /> {replies[post.id]?.length || 0}
                       </button>
                     </div>
 
                     {replyingTo === post.id && (
-                      <div className="flex flex-col gap-2 pt-2 animate-in fade-in">
-                        <input 
-                          type="text" value={replyText} onChange={(e) => setReplyText(e.target.value)}
-                          placeholder="Whisper a reply..."
-                          className={`border-none rounded-xl px-4 py-2 text-sm focus:ring-1 focus:ring-rose-200 ${activeTheme.input}`}
-                          onKeyDown={(e) => e.key === 'Enter' && handleReplySubmit(post.id)}
-                        />
-                        <div className="flex justify-end">
-                          <button onClick={() => handleReplySubmit(post.id)} className={`text-[10px] px-3 py-1 rounded-full font-bold shadow-sm ${activeTheme.accent}`}>Reply</button>
-                        </div>
+                      <div className="mt-3 flex gap-2">
+                        <input type="text" value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleReplySubmit(post.id)} placeholder="Whisper a reply..." className={`flex-1 rounded-xl px-4 py-2 text-sm ${activeTheme.input}`} />
+                        <button onClick={() => handleReplySubmit(post.id)} className={`px-4 py-2 rounded-xl text-xs font-bold ${activeTheme.accent}`}>Send</button>
                       </div>
                     )}
 
-                    {replies[post.id] && replies[post.id].length > 0 && (
-                      <div className={`space-y-3 mt-4 border-l-2 pl-4 ${theme === 'vivid' ? 'border-white/20' : 'border-rose-100'}`}>
-                        {replies[post.id].map(reply => (
-                          <div key={reply.id} className={`p-3 rounded-2xl text-sm animate-in slide-in-from-left-2 ${theme === 'vivid' ? 'bg-white/10' : 'bg-rose-50/50'}`}>
-                            <span className={`text-[10px] font-bold block mb-0.5 opacity-60 ${activeTheme.text}`}>{reply.username}</span>
-                            <p className={`${theme === 'vivid' ? 'text-white' : 'text-rose-600'} italic leading-relaxed`}>{reply.content}</p>
-                          </div>
-                        ))}
+                    {replies[post.id]?.map(reply => (
+                      <div key={reply.id} className={`mt-3 p-3 rounded-2xl text-sm ${theme === 'vivid' ? 'bg-white/10' : 'bg-rose-50/50'}`}>
+                        <span className={`text-[10px] font-bold block opacity-60 ${activeTheme.text}`}>{reply.username}</span>
+                        <p className={`italic ${theme === 'vivid' ? 'text-white' : 'text-rose-700'}`}>{reply.content}</p>
                       </div>
-                    )}
+                    ))}
                   </div>
                 );
               })}
@@ -546,51 +462,38 @@ const App: React.FC = () => {
 
         {currentView === 'prompts' && (
           <div className="w-full space-y-8 view-enter text-center">
-            <h2 className={`text-4xl font-pacifico ${activeTheme.text}`}>Daily Love Ask</h2>
+            <h2 className={`text-4xl font-pacifico ${activeTheme.text}`}>Daily Question</h2>
             <div className={`backdrop-blur-lg p-10 rounded-[2.5rem] border space-y-8 relative overflow-hidden transition-all duration-500 ${activeTheme.card}`}>
               <Quote className={`absolute top-4 left-4 w-24 h-24 -z-10 opacity-10 ${activeTheme.text}`} />
               <h3 className={`text-2xl font-bold italic leading-relaxed ${theme === 'vivid' ? 'text-white' : activeTheme.text}`}>"{currentPrompt}"</h3>
-              <div className="space-y-4 relative z-10">
-                <input 
-                  type="text" value={promptAnswer} onChange={(e) => setPromptAnswer(e.target.value)} 
-                  placeholder="Whisper your answer here..." 
-                  className={`w-full border-2 rounded-2xl px-6 py-4 text-center text-lg font-medium transition-all ${activeTheme.input}`} 
-                />
-                <button onClick={handlePromptSubmit} disabled={!promptAnswer.trim()} className={`w-full font-bold py-4 rounded-2xl shadow-lg active:scale-95 disabled:opacity-50 transition-all ${activeTheme.accent}`}>
-                  Send Globally 💌
-                </button>
-              </div>
-              {aiReaction && (
-                <div className={`p-4 rounded-2xl border animate-in fade-in ${theme === 'vivid' ? 'bg-white/10 border-white/20' : 'bg-rose-50 border-rose-100'}`}>
-                  <p className={`font-medium italic flex items-center justify-center gap-2 ${activeTheme.text}`}>
-                    <Sparkles size={16} className="text-yellow-400" /> {aiReaction}
-                  </p>
-                </div>
-              )}
+              <input type="text" value={promptAnswer} onChange={(e) => setPromptAnswer(e.target.value)} placeholder="Type your answer..." className={`w-full border-2 rounded-2xl px-6 py-4 text-center text-lg font-medium ${activeTheme.input}`} />
+              <button onClick={() => { if(promptAnswer.trim()) { saveToFeed(currentPrompt, promptAnswer); setPromptAnswer(""); } }} disabled={!promptAnswer.trim()} className={`w-full font-bold py-4 rounded-2xl shadow-lg transition-all ${activeTheme.accent}`}>Share with the World 💌</button>
+              {aiReaction && <div className={`p-4 rounded-2xl border animate-in fade-in ${theme === 'vivid' ? 'bg-white/10 border-white/20' : 'bg-rose-50 border-rose-100'}`}><p className={`font-medium italic text-sm ${activeTheme.text}`}><Sparkles size={14} className="inline mr-1 text-yellow-400" /> {aiReaction}</p></div>}
             </div>
-            <button onClick={() => { setCurrentPrompt(PROMPTS[Math.floor(Math.random() * PROMPTS.length)]); setAiReaction(""); }} className={`font-bold text-xs uppercase hover:opacity-100 opacity-60 transition-colors flex items-center gap-2 mx-auto ${activeTheme.text}`}>
-              <Radio size={14} /> Shuffle Question
-            </button>
+            <button onClick={() => setCurrentPrompt(PROMPTS[Math.floor(Math.random() * PROMPTS.length)])} className={`font-bold text-xs uppercase opacity-60 hover:opacity-100 transition-colors ${activeTheme.text}`}>Shuffle Prompt</button>
           </div>
         )}
       </main>
 
       <div className="fixed bottom-6 right-6 flex flex-col gap-3 items-end z-20">
         <div className={`flex items-center gap-1 p-1 rounded-full backdrop-blur-md border shadow-lg transition-all duration-500 ${activeTheme.nav}`}>
-          <button onClick={() => toggleTheme('romantic')} className={`p-2 rounded-full transition-all ${theme === 'romantic' ? 'bg-rose-500 text-white' : 'text-rose-400'}`} title="Romantic Theme"><Heart size={16} /></button>
-          <button onClick={() => toggleTheme('dark')} className={`p-2 rounded-full transition-all ${theme === 'dark' ? 'bg-slate-700 text-white' : 'text-slate-500'}`} title="Dark Theme"><Moon size={16} /></button>
-          <button onClick={() => toggleTheme('vivid')} className={`p-2 rounded-full transition-all ${theme === 'vivid' ? 'bg-indigo-500 text-white' : 'text-indigo-400'}`} title="Vivid Theme"><Zap size={16} /></button>
-          <button onClick={() => toggleTheme('calm')} className={`p-2 rounded-full transition-all ${theme === 'calm' ? 'bg-slate-700 text-white' : 'text-slate-400'}`} title="Calm Theme"><Leaf size={16} /></button>
+          {(['romantic', 'dark', 'vivid', 'calm'] as ThemeMode[]).map(t => (
+            <button key={t} onClick={() => toggleTheme(t)} className={`p-2 rounded-full transition-all ${theme === t ? 'bg-rose-500 text-white shadow-sm' : 'text-rose-400'}`}>
+              {t === 'romantic' && <Heart size={16} />}
+              {t === 'dark' && <Moon size={16} />}
+              {t === 'vivid' && <Zap size={16} />}
+              {t === 'calm' && <Leaf size={16} />}
+            </button>
+          ))}
         </div>
-        
         <button onClick={() => setIsMuted(!isMuted)} className={`p-3 backdrop-blur-md rounded-full shadow-sm border z-20 hover:scale-110 transition-all ${activeTheme.nav} ${activeTheme.text}`}>
           {isMuted ? <VolumeX size={20} /> : <Music size={20} className="animate-pulse" />}
         </button>
       </div>
 
       <div className="fixed bottom-6 w-full flex justify-center pointer-events-none z-10">
-        <a href="https://t.me/savvy_society" target="_blank" rel="noopener noreferrer" className={`backdrop-blur-md px-5 py-2 rounded-full text-[10px] font-bold tracking-widest border shadow-sm pointer-events-auto flex items-center gap-2 uppercase transition-all transition-colors duration-500 ${activeTheme.nav} ${activeTheme.text} hover:opacity-80`}>
-          built with ❤️‍🔥 by <span className="underline underline-offset-4 decoration-current opacity-70">savvy</span>
+        <a href="https://t.me/savvy_society" target="_blank" rel="noopener noreferrer" className={`backdrop-blur-md px-5 py-2 rounded-full text-[10px] font-bold tracking-widest border shadow-sm pointer-events-auto flex items-center gap-2 uppercase transition-all duration-500 ${activeTheme.nav} ${activeTheme.text} hover:opacity-80`}>
+          built with ❤️ by <span className="underline underline-offset-4 decoration-current opacity-70">savvy</span>
         </a>
       </div>
     </div>
