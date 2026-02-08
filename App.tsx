@@ -33,13 +33,16 @@ const PROMPTS = [
   "What song reminds you of love?",
   "First thing you notice in a crush?",
   "Your idea of a perfect rainy day with someone?",
-  "What's the best compliment you've ever received?"
+  "What's the best compliment you've ever received?",
+  "Did you believe in love at first sight? Why or why not?",
+  "What's a small act of kindness that melts your heart?",
+  "If you could send a love letter to your past self, what would it say?" 
 ];
 
 // --- Supabase Client ---
 const getSupabaseConfig = () => {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
+  const url = process.env.SUPABASE_URL || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphenRqaWxqanF2cG14amNkdGVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI4NjI0NjcsImV4cCI6MjA3ODQzODQ2N30.kmXhS5DOr-k3Tx_FOGLr7IXa-Df8QtTNaxpzBMU-0JA";
+  const key = process.env.SUPABASE_ANON_KEY|| "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphenRqaWxqanF2cG14amNkdGVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI4NjI0NjcsImV4cCI6MjA3ODQzODQ2N30.kmXhS5DOr-k3Tx_FOGLr7IXa-Df8QtTNaxpzBMU-0JA";
   return { url, key };
 };
 
