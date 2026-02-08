@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { 
   Heart, Sparkles, Clock, Music, VolumeX, MessageCircle, 
-  Send, Users, Home as HomeIcon, Ghost, Quote, AlertCircle, ChevronRight, Activity, Radio, Database, ShieldAlert
+  Send, Users, Home as HomeIcon, Ghost, Quote, AlertCircle, ChevronRight, Activity, Radio, Database, ShieldAlert, CheckCircle2, XCircle, Info
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -20,10 +20,10 @@ interface GlobalResponse {
 }
 
 const STORAGE_KEYS = {
-  ACCEPTED: 'valentine_accepted_v3',
-  REACTION: 'valentine_ai_reaction_v3',
-  MY_USERNAME: 'valentine_my_username_v3',
-  LOCAL_FEED: 'valentine_local_feed_v3'
+  ACCEPTED: 'valentine_accepted_v5',
+  REACTION: 'valentine_ai_reaction_v5',
+  MY_USERNAME: 'valentine_my_username_v5',
+  LOCAL_FEED: 'valentine_local_feed_v5'
 };
 
 const PROMPTS = [
@@ -33,16 +33,26 @@ const PROMPTS = [
   "What song reminds you of love?",
   "First thing you notice in a crush?",
   "Your idea of a perfect rainy day with someone?",
-  "What's the best compliment you've ever received?",
-  "Did you believe in love at first sight? Why or why not?",
-  "What's a small act of kindness that melts your heart?",
-  "If you could send a love letter to your past self, what would it say?" 
+  "What's the best compliment you've ever received?"
 ];
 
-// --- Supabase Client ---
+// --- Supabase Client Configuration ---
 const getSupabaseConfig = () => {
-  const url = process.env.SUPABASE_URL || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphenRqaWxqanF2cG14amNkdGVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI4NjI0NjcsImV4cCI6MjA3ODQzODQ2N30.kmXhS5DOr-k3Tx_FOGLr7IXa-Df8QtTNaxpzBMU-0JA";
-  const key = process.env.SUPABASE_ANON_KEY|| "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphenRqaWxqanF2cG14amNkdGVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI4NjI0NjcsImV4cCI6MjA3ODQzODQ2N30.kmXhS5DOr-k3Tx_FOGLr7IXa-Df8QtTNaxpzBMU-0JA";
+  // Support Vite's import.meta.env + standard process.env + common prefixes
+  const url = 
+    (import.meta as any).env?.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL || 
+    (process.env as any).VITE_SUPABASE_URL || 
+    (window as any)._env_?.SUPABASE_URL ||
+    '';
+    
+  const key = 
+    (import.meta as any).env?.VITE_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY || 
+    (process.env as any).VITE_SUPABASE_ANON_KEY || 
+    (window as any)._env_?.SUPABASE_ANON_KEY ||
+    '';
+
   return { url, key };
 };
 
@@ -105,12 +115,21 @@ const App: React.FC = () => {
 
   const timerIntervalRef = useRef<number | null>(null);
 
-  // Memoized Supabase Client to prevent recreation
+  // Memoized config for stability
+  const config = useMemo(() => getSupabaseConfig(), []);
+
+  // Memoized Supabase Client
   const supabase = useMemo(() => {
-    const { url, key } = getSupabaseConfig();
-    if (url && key) return createClient(url, key);
+    if (config.url && config.key) {
+      try {
+        return createClient(config.url, config.key);
+      } catch (e) {
+        console.error("Client creation failed", e);
+        return null;
+      }
+    }
     return null;
-  }, []);
+  }, [config]);
 
   // --- Data Logic ---
   useEffect(() => {
@@ -132,7 +151,7 @@ const App: React.FC = () => {
             setDbError(null);
           }
         } catch (e: any) {
-          setDbError(e.message || "Failed to connect to database");
+          setDbError(e.message || "Connection refused by Supabase.");
           loadFallbackLocalData();
         }
       };
@@ -149,7 +168,9 @@ const App: React.FC = () => {
           });
         })
         .subscribe((status) => {
-          if (status === 'SUBSCRIBED') setIsConnected(true);
+          if (status === 'SUBSCRIBED') {
+             setIsConnected(true);
+          }
         });
 
       return () => { supabase.removeChannel(channel); };
@@ -174,21 +195,25 @@ const App: React.FC = () => {
       created_at: new Date().toISOString()
     };
 
-    if (supabase && !dbError) {
+    let savedGlobally = false;
+    if (supabase && isConnected && !dbError) {
       const { error } = await supabase.from('responses').insert([{ username, question, answer }]);
       if (error) {
         console.error("Supabase Save Error:", error.message);
         setDbError(`Save failed: ${error.message}`);
-        // Add locally as fallback
-        setGlobalFeed(prev => [entry, ...prev].slice(0, 50));
+      } else {
+        savedGlobally = true;
       }
-    } else {
+    }
+
+    if (!savedGlobally) {
       setGlobalFeed(prev => {
         const next = [entry, ...prev].slice(0, 50);
         localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(next));
         return next;
       });
     }
+
     confetti({ particleCount: 30, spread: 60, origin: { y: 0.8 }, colors: ['#f43f5e'] });
     return true;
   };
@@ -229,7 +254,7 @@ const App: React.FC = () => {
       });
       const txt = resp.text?.trim() || "Love is written in the stars... 🌹";
       const user = "CupidAI";
-      if (supabase && !dbError) {
+      if (supabase && isConnected && !dbError) {
         await supabase.from('responses').insert([{ username: user, question: "Confession", answer: txt }]);
       } else {
         const entry = { id: Date.now(), username: user, question: "Confession", answer: txt, created_at: new Date().toISOString() };
@@ -352,26 +377,42 @@ const App: React.FC = () => {
               <p className="text-rose-400 font-medium italic">Whispers from the collective heart.</p>
             </div>
 
-            {/* --- CONNECTION TROUBLESHOOTER (Only shows if something is wrong) --- */}
-            {(!isConnected || dbError) && (
-              <div className="bg-amber-50/80 border border-amber-200 rounded-2xl p-4 animate-in fade-in zoom-in slide-in-from-top-4 duration-500 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <div className="bg-amber-100 p-2 rounded-full text-amber-600">
-                    <Database size={20} />
+            {/* --- DIAGNOSTIC DASHBOARD --- */}
+            {(!isConnected || dbError || !config.url) && (
+              <div className="bg-white/80 border border-rose-100 rounded-2xl p-6 shadow-sm space-y-4">
+                <div className="flex items-center gap-2 text-rose-600 font-bold">
+                   <Info size={18} /> Connection Health Check
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className={`p-3 rounded-xl border flex items-center justify-between ${config.url ? 'bg-green-50 border-green-200 text-green-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] uppercase font-bold opacity-60">Supabase URL</span>
+                      <span className="text-xs font-mono">{config.url ? 'Detected ✅' : 'Missing ❌'}</span>
+                    </div>
+                    {config.url ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
                   </div>
-                  <div className="space-y-1">
-                    <h4 className="text-sm font-bold text-amber-800 uppercase tracking-tight">Database Troubleshooter</h4>
-                    <p className="text-xs text-amber-700 leading-relaxed">
-                      {!supabase ? (
-                        "Environment keys 'SUPABASE_URL' or 'SUPABASE_ANON_KEY' were not found. App is running in Local Mode."
-                      ) : dbError?.includes("relation") ? (
-                        "Supabase keys found, but table 'responses' does not exist in your project yet. Check your SQL Editor!"
-                      ) : (
-                        dbError || "Connecting to the global network..."
-                      )}
-                    </p>
+                  <div className={`p-3 rounded-xl border flex items-center justify-between ${config.key ? 'bg-green-50 border-green-200 text-green-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] uppercase font-bold opacity-60">Anon Key</span>
+                      <span className="text-xs font-mono">{config.key ? 'Detected ✅' : 'Missing ❌'}</span>
+                    </div>
+                    {config.key ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
                   </div>
                 </div>
+                {dbError && (
+                  <div className="bg-red-50 text-red-600 p-3 rounded-xl text-xs border border-red-100 flex items-start gap-2">
+                    <ShieldAlert size={14} className="mt-0.5" />
+                    <div className="flex flex-col">
+                      <span className="font-bold">Database Error:</span>
+                      <span>{dbError.includes('relation') ? "Table 'responses' not found. Have you created it in your SQL Editor?" : dbError}</span>
+                    </div>
+                  </div>
+                )}
+                {!config.url && (
+                  <p className="text-[10px] text-rose-400 italic">
+                    Tip: Add variables named <code className="bg-rose-100 px-1 rounded">VITE_SUPABASE_URL</code> and <code className="bg-rose-100 px-1 rounded">VITE_SUPABASE_ANON_KEY</code> in your environment settings.
+                  </p>
+                )}
               </div>
             )}
 
@@ -469,4 +510,5 @@ const App: React.FC = () => {
     </div>
   );
 };
+
 export default App;
