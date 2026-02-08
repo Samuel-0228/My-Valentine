@@ -29,12 +29,12 @@ interface GlobalResponse {
 }
 
 const STORAGE_KEYS = {
-  ACCEPTED: 'valentine_accepted_v9',
-  REACTION: 'valentine_ai_reaction_v9',
-  MY_USERNAME: 'valentine_my_username_v9',
-  LOCAL_FEED: 'valentine_local_feed_v9',
-  LIKED_POSTS: 'valentine_liked_posts_v9',
-  THEME: 'valentine_theme_v9'
+  ACCEPTED: 'valentine_accepted_v10',
+  REACTION: 'valentine_ai_reaction_v10',
+  MY_USERNAME: 'valentine_my_username_v10',
+  LOCAL_FEED: 'valentine_local_feed_v10',
+  LIKED_POSTS: 'valentine_liked_posts_v10',
+  THEME: 'valentine_theme_v10'
 };
 
 const PROMPTS = [
@@ -96,8 +96,8 @@ const THEME_CONFIG: Record<ThemeMode, {
 };
 
 const getSupabaseConfig = () => {
-  const url = (import.meta as any).env?.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const key = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
+  const url = (import.meta as any).env?.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const key = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
   return { url, key };
 };
 
@@ -167,52 +167,67 @@ const App: React.FC = () => {
 
   const activeTheme = THEME_CONFIG[theme];
 
+  // Ref to keep track of current feed for async handlers (avoid stale closures)
+  const feedRef = useRef<GlobalResponse[]>([]);
+  useEffect(() => { feedRef.current = globalFeed; }, [globalFeed]);
+
   // --- Data Logic ---
   useEffect(() => {
-    // Load local cache immediately
     const cached = localStorage.getItem(STORAGE_KEYS.LOCAL_FEED);
     if (cached) setGlobalFeed(JSON.parse(cached));
 
     if (supabase) {
       const fetchData = async () => {
-        const { data: postsData } = await supabase.from('responses').select('*').order('created_at', { ascending: false }).limit(40);
-        const { data: repliesData } = await supabase.from('replies').select('*');
-        if (postsData) { 
-          setGlobalFeed(postsData); 
-          setIsConnected(true); 
-          localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(postsData));
-        }
-        if (repliesData) {
-          const replyMap: Record<string | number, Reply[]> = {};
-          repliesData.forEach((r: Reply) => {
-            if (!replyMap[r.post_id]) replyMap[r.post_id] = [];
-            replyMap[r.post_id].push(r);
-          });
-          setReplies(replyMap);
+        try {
+          const { data: postsData } = await supabase.from('responses').select('*').order('created_at', { ascending: false }).limit(40);
+          const { data: repliesData } = await supabase.from('replies').select('*');
+          
+          if (postsData) { 
+            setGlobalFeed(postsData); 
+            setIsConnected(true); 
+            localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(postsData));
+          }
+          if (repliesData) {
+            const replyMap: Record<string | number, Reply[]> = {};
+            repliesData.forEach((r: Reply) => {
+              if (!replyMap[r.post_id]) replyMap[r.post_id] = [];
+              replyMap[r.post_id].push(r);
+            });
+            setReplies(replyMap);
+          }
+        } catch (err) {
+          console.error("Initial fetch failed:", err);
         }
       };
       fetchData();
 
       const postsChannel = supabase.channel('posts-channel')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'responses' }, (payload) => {
-          if (payload.eventType === 'INSERT') setGlobalFeed(prev => {
-            const exists = prev.some(p => p.id === payload.new.id);
-            if (exists) return prev;
-            const updated = [payload.new as GlobalResponse, ...prev].slice(0, 50);
-            localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated));
-            return updated;
-          });
-          if (payload.eventType === 'UPDATE') setGlobalFeed(prev => {
-            const updated = prev.map(p => p.id === payload.new.id ? { ...p, ...payload.new } : p);
-            localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated));
-            return updated;
-          });
+          if (payload.eventType === 'INSERT') {
+            setGlobalFeed(prev => {
+              // Deduplicate (in case optimistic update matches the incoming DB insert)
+              if (prev.some(p => p.id === payload.new.id)) return prev;
+              const updated = [payload.new as GlobalResponse, ...prev].slice(0, 50);
+              localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated));
+              return updated;
+            });
+          }
+          if (payload.eventType === 'UPDATE') {
+            setGlobalFeed(prev => {
+              const updated = prev.map(p => p.id === payload.new.id ? { ...p, ...payload.new } : p);
+              localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated));
+              return updated;
+            });
+          }
         }).subscribe();
 
       const repliesChannel = supabase.channel('replies-channel')
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'replies' }, (payload) => {
           const newReply = payload.new as Reply;
-          setReplies(prev => ({ ...prev, [newReply.post_id]: [...(prev[newReply.post_id] || []), newReply] }));
+          setReplies(prev => {
+            if ((prev[newReply.post_id] || []).some(r => r.id === newReply.id)) return prev;
+            return { ...prev, [newReply.post_id]: [...(prev[newReply.post_id] || []), newReply] };
+          });
         }).subscribe();
 
       return () => {
@@ -223,9 +238,10 @@ const App: React.FC = () => {
   }, [supabase]);
 
   const handleLike = async (postId: string | number) => {
-    if (likedPosts.has(postId)) return;
+    // Prevent liking optimistic temp posts that don't have a DB ID yet
+    if (likedPosts.has(postId) || String(postId).startsWith('temp-')) return;
     
-    // Optimistic state update
+    // 1. Optimistic Update
     setGlobalFeed(prev => prev.map(p => p.id === postId ? { ...p, likes: (p.likes || 0) + 1 } : p));
     const newLiked = new Set(likedPosts).add(postId);
     setLikedPosts(newLiked);
@@ -233,42 +249,58 @@ const App: React.FC = () => {
     
     confetti({ particleCount: 20, spread: 50, colors: [theme === 'dark' ? '#fb7185' : '#f43f5e'] });
 
-    if (supabase && isConnected) {
-      const post = globalFeed.find(p => p.id === postId);
-      await supabase.from('responses').update({ likes: (post?.likes || 0) + 1 }).eq('id', postId);
+    // 2. Real Persistence
+    if (supabase) {
+      // Find current count from ref to avoid stale closure issues
+      const currentPost = feedRef.current.find(p => p.id === postId);
+      const newCount = (currentPost?.likes || 0) + 1;
+      const { error } = await supabase.from('responses').update({ likes: newCount }).eq('id', postId);
+      if (error) console.error("Persistence failed for like:", error);
     }
   };
 
   const handleReplySubmit = async (postId: string | number) => {
-    if (!replyText.trim()) return;
+    if (!replyText.trim() || String(postId).startsWith('temp-')) return;
     const username = getOrGenerateUsername();
-    
-    // Optimistic state update
-    const tempReply: Reply = {
-      id: 'temp-' + Date.now(),
-      post_id: postId,
-      username,
-      content: replyText,
-      created_at: new Date().toISOString()
-    };
-    setReplies(prev => ({ ...prev, [postId]: [...(prev[postId] || []), tempReply] }));
     
     const contentToSubmit = replyText;
     setReplyText("");
     setReplyingTo(null);
+
+    // 1. Optimistic Local state update
+    const tempReplyId = 'temp-reply-' + Date.now();
+    const tempReply: Reply = {
+      id: tempReplyId,
+      post_id: postId,
+      username,
+      content: contentToSubmit,
+      created_at: new Date().toISOString()
+    };
+    setReplies(prev => ({ ...prev, [postId]: [...(prev[postId] || []), tempReply] }));
     confetti({ particleCount: 15, spread: 30, colors: ['#fb7185'] });
 
-    if (supabase && isConnected) {
-      await supabase.from('replies').insert([{ post_id: postId, username, content: contentToSubmit }]);
+    // 2. Real Persistence
+    if (supabase) {
+      const { data, error } = await supabase.from('replies').insert([{ post_id: postId, username, content: contentToSubmit }]).select();
+      if (error) {
+        console.error("Reply save failed:", error);
+      } else if (data) {
+        // Swap temp reply for real one
+        setReplies(prev => ({
+          ...prev,
+          [postId]: prev[postId].map(r => r.id === tempReplyId ? data[0] : r)
+        }));
+      }
     }
   };
 
   const saveToFeed = async (question: string, answer: string) => {
     const username = getOrGenerateUsername();
     
-    // Optimistic state update
+    // 1. Optimistic local state update
+    const tempId = 'temp-' + Date.now();
     const tempPost: GlobalResponse = {
-      id: 'temp-' + Date.now(),
+      id: tempId,
       username,
       question,
       answer,
@@ -276,15 +308,22 @@ const App: React.FC = () => {
       created_at: new Date().toISOString()
     };
     setGlobalFeed(prev => [tempPost, ...prev]);
-    localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify([tempPost, ...globalFeed]));
-
     confetti({ particleCount: 30, spread: 60 });
 
-    if (supabase && isConnected) {
+    // 2. Real Persistence
+    if (supabase) {
       const { data, error } = await supabase.from('responses').insert([{ username, question, answer, likes: 0 }]).select();
-      if (!error && data) {
-        // Replace temp post with real post from DB
-        setGlobalFeed(prev => prev.map(p => p.id === tempPost.id ? data[0] : p));
+      if (error) {
+        console.error("Post save failed:", error);
+        // Maybe revert optimistic update if save fails completely? 
+        // For now, keep it local as a "ghost" post.
+      } else if (data) {
+        // Replace temp post with real post from DB (this updates the ID so likes/replies work)
+        setGlobalFeed(prev => {
+          const updated = prev.map(p => p.id === tempId ? data[0] : p);
+          localStorage.setItem(STORAGE_KEYS.LOCAL_FEED, JSON.stringify(updated.filter(p => !String(p.id).startsWith('temp-'))));
+          return updated;
+        });
       }
     }
   };
@@ -295,7 +334,7 @@ const App: React.FC = () => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: "Generate a short, unique, and sweet romantic confession or anonymous Valentine's message. Max 15 words.",
+        contents: "Generate a short, unique, and sweet romantic confession or anonymous Valentine's message. Max 15 words. Just text.",
       });
       if (response.text) {
         setNewConfession(response.text.trim().replace(/^"|"$/g, ''));
@@ -325,7 +364,7 @@ const App: React.FC = () => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `Reaction to answer "${content}" for prompt "${currentPrompt}". Max 10 words. Sweet/playful.`,
+        contents: `Reaction to answer "${content}" for prompt "${currentPrompt}". Max 10 words. Sweet/playful. Just text.`,
       });
       if (response.text) {
         const reaction = response.text.trim().replace(/^"|"$/g, '');
@@ -426,7 +465,7 @@ const App: React.FC = () => {
             <div className="text-center">
               <h2 className={`text-4xl font-pacifico mb-2 ${activeTheme.text}`}>Global Feed</h2>
               <span className={`px-4 py-1 text-[10px] font-bold uppercase tracking-widest rounded-full border shadow-sm ${isConnected ? 'bg-green-500/10 text-green-500 border-green-500/20' : 'bg-rose-500/10 text-rose-500 border-rose-500/20'}`}>
-                {isConnected ? '• Live' : 'Not Connected'}
+                {isConnected ? '• Live' : 'Connecting...'}
               </span>
             </div>
 
@@ -447,57 +486,60 @@ const App: React.FC = () => {
             </div>
 
             <div className="space-y-6">
-              {globalFeed.map((post) => (
-                <div key={post.id} className={`p-6 rounded-3xl border transition-all animate-in slide-in-from-bottom-2 ${activeTheme.card}`}>
-                  <div>
-                    <div className="flex justify-between items-center mb-1">
-                      <span className={`text-xs font-bold uppercase flex items-center gap-1 opacity-70 ${activeTheme.text}`}><Ghost size={12} /> {post.username}</span>
-                      <span className={`text-[10px] font-medium opacity-50 ${activeTheme.text}`}>{new Date(post.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                    </div>
-                    {post.question !== "Confession" && <p className={`text-[10px] font-bold uppercase mb-1 opacity-60 ${activeTheme.text}`}>Q: {post.question}</p>}
-                    <p className={`font-medium italic text-xl ${theme === 'vivid' ? 'text-white' : activeTheme.text} ${theme !== 'vivid' && 'opacity-90'}`}>"{post.answer}"</p>
-                  </div>
-
-                  <div className={`flex items-center gap-4 pt-2 border-t mt-4 transition-all ${theme === 'vivid' ? 'border-white/20' : 'border-rose-100/50'}`}>
-                    <button 
-                      onClick={() => handleLike(post.id)} 
-                      disabled={likedPosts.has(post.id)}
-                      className={`flex items-center gap-1.5 transition-all font-bold text-sm ${likedPosts.has(post.id) ? 'text-rose-500 cursor-default' : activeTheme.text + ' opacity-70 hover:opacity-100 group'}`}
-                    >
-                      <Heart size={16} className={`${likedPosts.has(post.id) ? 'fill-rose-500 text-rose-500' : 'group-hover:scale-125 transition-transform'}`} />
-                      {post.likes || 0}
-                    </button>
-                    <button onClick={() => setReplyingTo(replyingTo === post.id ? null : post.id)} className={`flex items-center gap-1.5 transition-all font-bold text-sm ${activeTheme.text} opacity-70 hover:opacity-100`}>
-                      <MessageSquare size={16} /> {replies[post.id]?.length || 0}
-                    </button>
-                  </div>
-
-                  {replyingTo === post.id && (
-                    <div className="flex flex-col gap-2 pt-2 animate-in fade-in">
-                      <input 
-                        type="text" value={replyText} onChange={(e) => setReplyText(e.target.value)}
-                        placeholder="Whisper a reply..."
-                        className={`border-none rounded-xl px-4 py-2 text-sm focus:ring-1 focus:ring-rose-200 ${activeTheme.input}`}
-                        onKeyDown={(e) => e.key === 'Enter' && handleReplySubmit(post.id)}
-                      />
-                      <div className="flex justify-end">
-                        <button onClick={() => handleReplySubmit(post.id)} className={`text-[10px] px-3 py-1 rounded-full font-bold shadow-sm ${activeTheme.accent}`}>Reply</button>
+              {globalFeed.map((post) => {
+                const isTemp = String(post.id).startsWith('temp-');
+                return (
+                  <div key={post.id} className={`p-6 rounded-3xl border transition-all animate-in slide-in-from-bottom-2 ${activeTheme.card} ${isTemp ? 'opacity-50 grayscale-[0.5]' : ''}`}>
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <span className={`text-xs font-bold uppercase flex items-center gap-1 opacity-70 ${activeTheme.text}`}><Ghost size={12} /> {post.username} {isTemp && "(Sending...)"}</span>
+                        <span className={`text-[10px] font-medium opacity-50 ${activeTheme.text}`}>{new Date(post.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                       </div>
+                      {post.question !== "Confession" && <p className={`text-[10px] font-bold uppercase mb-1 opacity-60 ${activeTheme.text}`}>Q: {post.question}</p>}
+                      <p className={`font-medium italic text-xl ${theme === 'vivid' ? 'text-white' : activeTheme.text} ${theme !== 'vivid' && 'opacity-90'}`}>"{post.answer}"</p>
                     </div>
-                  )}
 
-                  {replies[post.id] && replies[post.id].length > 0 && (
-                    <div className={`space-y-3 mt-4 border-l-2 pl-4 ${theme === 'vivid' ? 'border-white/20' : 'border-rose-100'}`}>
-                      {replies[post.id].map(reply => (
-                        <div key={reply.id} className={`p-3 rounded-2xl text-sm animate-in slide-in-from-left-2 ${theme === 'vivid' ? 'bg-white/10' : 'bg-rose-50/50'}`}>
-                          <span className={`text-[10px] font-bold block mb-0.5 opacity-60 ${activeTheme.text}`}>{reply.username}</span>
-                          <p className={`${theme === 'vivid' ? 'text-white' : 'text-rose-600'} italic leading-relaxed`}>{reply.content}</p>
-                        </div>
-                      ))}
+                    <div className={`flex items-center gap-4 pt-2 border-t mt-4 transition-all ${theme === 'vivid' ? 'border-white/20' : 'border-rose-100/50'}`}>
+                      <button 
+                        onClick={() => handleLike(post.id)} 
+                        disabled={likedPosts.has(post.id) || isTemp}
+                        className={`flex items-center gap-1.5 transition-all font-bold text-sm ${likedPosts.has(post.id) ? 'text-rose-500 cursor-default' : activeTheme.text + ' opacity-70 hover:opacity-100 group'} ${isTemp ? 'cursor-not-allowed opacity-30' : ''}`}
+                      >
+                        <Heart size={16} className={`${likedPosts.has(post.id) ? 'fill-rose-500 text-rose-500' : 'group-hover:scale-125 transition-transform'}`} />
+                        {post.likes || 0}
+                      </button>
+                      <button onClick={() => !isTemp && setReplyingTo(replyingTo === post.id ? null : post.id)} className={`flex items-center gap-1.5 transition-all font-bold text-sm ${activeTheme.text} opacity-70 hover:opacity-100 ${isTemp ? 'cursor-not-allowed opacity-30' : ''}`}>
+                        <MessageSquare size={16} /> {replies[post.id]?.length || 0}
+                      </button>
                     </div>
-                  )}
-                </div>
-              ))}
+
+                    {replyingTo === post.id && (
+                      <div className="flex flex-col gap-2 pt-2 animate-in fade-in">
+                        <input 
+                          type="text" value={replyText} onChange={(e) => setReplyText(e.target.value)}
+                          placeholder="Whisper a reply..."
+                          className={`border-none rounded-xl px-4 py-2 text-sm focus:ring-1 focus:ring-rose-200 ${activeTheme.input}`}
+                          onKeyDown={(e) => e.key === 'Enter' && handleReplySubmit(post.id)}
+                        />
+                        <div className="flex justify-end">
+                          <button onClick={() => handleReplySubmit(post.id)} className={`text-[10px] px-3 py-1 rounded-full font-bold shadow-sm ${activeTheme.accent}`}>Reply</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {replies[post.id] && replies[post.id].length > 0 && (
+                      <div className={`space-y-3 mt-4 border-l-2 pl-4 ${theme === 'vivid' ? 'border-white/20' : 'border-rose-100'}`}>
+                        {replies[post.id].map(reply => (
+                          <div key={reply.id} className={`p-3 rounded-2xl text-sm animate-in slide-in-from-left-2 ${theme === 'vivid' ? 'bg-white/10' : 'bg-rose-50/50'}`}>
+                            <span className={`text-[10px] font-bold block mb-0.5 opacity-60 ${activeTheme.text}`}>{reply.username}</span>
+                            <p className={`${theme === 'vivid' ? 'text-white' : 'text-rose-600'} italic leading-relaxed`}>{reply.content}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
