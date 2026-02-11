@@ -44,7 +44,17 @@ const PROMPTS = [
   "What song reminds you of love?",
   "First thing you notice in a crush?",
   "Your idea of a perfect rainy day with someone?",
-  "What's the best compliment you've ever received?"
+  "What's the best compliment you've ever received?",
+  "If you could confess to anyone, who would it be and why?",
+  "What's a love story (real or fictional) that inspires you?",
+  "Describe your crush using only emojis.",
+  "What's a romantic gesture that always melts your heart?",
+  "If you could relive one romantic moment in your life, what would it be?",
+  "What's the most spontaneous thing you've done for love?",
+  "Describe your ideal partner in three words.",
+  "What's a love language you resonate with the most?",
+  "If you could write a love letter to your future self, what would it say?",
+  "What's a romantic movie or book that you think everyone should experience at least once?"
 ];
 
 // --- Theme Configs ---
